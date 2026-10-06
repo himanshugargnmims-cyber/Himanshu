@@ -12,7 +12,9 @@ from .crm import CRMClient
 
 app = Flask(__name__)
 
-KIND_ORDER = ["reparent", "rename", "update", "duplicate", "create", "not_on_website", "reactivate"]
+# Highest-stakes first: ownership moves and billing SOP, then dedupe, new accounts, field fixes.
+KIND_ORDER = ["reparent", "moved_away", "duplicate", "create", "rename", "update", "annotate",
+              "not_on_website", "parent_absorbed"]
 
 
 def db():

@@ -50,9 +50,9 @@
 <div class="card">
   <h3>Related CRM accounts</h3>
   <table>
-    <tr><th>Role</th><th>ID</th><th>Name</th><th>Address</th><th>Parent</th><th>Status</th><th>Revenue / AR</th></tr>
+    <tr><th>Role</th><th>ID</th><th>Name</th><th>Address</th><th>Parent</th><th>Status</th><th>Revenue / AR</th><th>Contacts</th></tr>
     {% for r in ev.related %}
-    <tr><td>{{ r.role }}</td><td>{{ r.id }}</td><td>{{ r.name }}</td><td>{{ r.address }}</td><td>{{ r.parent }}</td><td>{{ r.status }}</td><td>{{ r.billing }}</td></tr>
+    <tr><td>{{ r.role }}</td><td>{{ r.id }}</td><td>{{ r.name }}</td><td>{{ r.address }}</td><td>{{ r.parent }}</td><td>{{ r.status }}</td><td>{{ r.billing }}</td><td>{{ r.contacts }}</td></tr>
     {% endfor %}
   </table>
 </div>

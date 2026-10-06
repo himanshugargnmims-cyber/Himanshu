@@ -1,7 +1,13 @@
-"""Thin client for the Bellhaven CRM sandbox API."""
+"""Thin client for the Bellhaven CRM sandbox API (/api/v1, bearer token)."""
 import requests
 
 from . import config
+
+# Fields the API accepts on PATCH/POST /accounts (from its validation message).
+ACCOUNT_MUTABLE = {
+    "name", "parent_id", "status", "note", "care_type", "phone", "billing_street",
+    "billing_city", "billing_state", "billing_zip", "chow_current_account", "duplicate_of_account",
+}
 
 
 class CRMError(RuntimeError):
@@ -23,49 +29,35 @@ class CRMClient:
             raise CRMError(f"{method} {path} -> {resp.status_code}: {resp.text[:500]}")
         return resp.json() if resp.content else None
 
-    def list_accounts(self, page_size=100):
-        """Every account in the CRM, following pagination."""
-        accounts, page = [], 1
+    def _list(self, path, page_size=200):
+        items, page = [], 1
         while True:
-            data = self._request("GET", "/accounts", params={"page": page, "page_size": page_size})
-            batch = _items(data)
-            accounts.extend(batch)
-            if not batch or len(batch) < page_size or not _has_more(data, page, len(accounts)):
-                return accounts
+            data = self._request("GET", path, params={"page": page, "page_size": page_size})
+            items.extend(data["data"])
+            if not data["data"] or len(items) >= data["total"]:
+                return items
             page += 1
 
+    def list_accounts(self):
+        return self._list("/accounts")
+
+    def list_contacts(self):
+        return self._list("/contacts")
+
     def get_account(self, account_id):
-        return _unwrap(self._request("GET", f"/accounts/{account_id}"))
+        return self._request("GET", f"/accounts/{account_id}")
 
     def update_account(self, account_id, fields):
-        return _unwrap(self._request("PATCH", f"/accounts/{account_id}", json=fields))
+        bad = set(fields) - ACCOUNT_MUTABLE
+        if bad:
+            raise CRMError(f"Not mutable via API: {sorted(bad)}")
+        return self._request("PATCH", f"/accounts/{account_id}", json=fields)
 
     def create_account(self, fields):
-        return _unwrap(self._request("POST", "/accounts", json=fields))
+        bad = set(fields) - ACCOUNT_MUTABLE
+        if bad:
+            raise CRMError(f"Not settable via API: {sorted(bad)}")
+        return self._request("POST", "/accounts", json=fields)
 
-
-def _items(data):
-    if isinstance(data, list):
-        return data
-    for key in ("data", "items", "accounts", "results"):
-        if isinstance(data.get(key), list):
-            return data[key]
-    raise CRMError(f"Unrecognised list response shape: {list(data)[:10]}")
-
-
-def _has_more(data, page, fetched):
-    if isinstance(data, list):
-        return True
-    if "has_more" in data:
-        return bool(data["has_more"])
-    total = data.get("total") or data.get("count")
-    if total is not None:
-        return fetched < int(total)
-    pages = data.get("pages") or data.get("total_pages")
-    return pages is None or page < int(pages)
-
-
-def _unwrap(data):
-    if isinstance(data, dict) and isinstance(data.get("data"), dict):
-        return data["data"]
-    return data
+    def update_contact(self, contact_id, fields):
+        return self._request("PATCH", f"/contacts/{contact_id}", json=fields)

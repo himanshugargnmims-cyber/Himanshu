@@ -26,27 +26,32 @@ def _previous_location_count(conn):
     return None
 
 
-def run(client=None, conn=None, locations=None):
+def run(client=None, conn=None, site=None):
+    """site: optional pre-scraped {"locations", "about_text", "claimed_count"} (tests / replays)."""
     conn = conn or store.connect()
     client = client or CRMClient()
     run_id = store.start_run(conn)
     try:
-        locations = scraper.scrape() if locations is None else locations
+        site = scraper.scrape_site() if site is None else site
+        locations = site["locations"]
         prev = _previous_location_count(conn)
         if not locations or (prev and len(locations) < prev * MIN_FRACTION_OF_LAST_RUN):
             raise ScrapeLooksBroken(f"Scraped {len(locations)} locations (last good run: {prev}). Aborting.")
 
         accounts = client.list_accounts()
-        proposals, report = matcher.build_proposals(locations, accounts)
+        contacts = client.list_contacts()
+        proposals, report = matcher.build_proposals(locations, accounts, contacts, site.get("about_text", ""))
         counts = store.upsert_proposals(conn, run_id, proposals)
 
         snapshot_dir = config.DB_PATH.parent / "snapshots"
         snapshot_dir.mkdir(parents=True, exist_ok=True)
-        (snapshot_dir / f"run_{run_id}.json").write_text(
-            json.dumps({"locations": locations, "accounts": accounts, "report": report}, indent=2, default=str))
+        (snapshot_dir / f"run_{run_id}.json").write_text(json.dumps(
+            {"site": site, "accounts": accounts, "contacts": contacts, "report": report}, indent=2, default=str))
 
+        claimed = site.get("claimed_count")
         summary = {
             "website_locations": len(locations),
+            "website_claims": claimed,
             "crm_accounts": len(accounts),
             "confirmed_matches": len(report["confirmed"]),
             "proposals_this_run": len(proposals),
@@ -55,6 +60,8 @@ def run(client=None, conn=None, locations=None):
             "skipped_already_decided": counts["already_decided"],
             "marked_stale": counts["marked_stale"],
         }
+        if claimed and claimed != len(locations):
+            summary["warning"] = f"homepage claims {claimed} communities but {len(locations)} were found"
         store.finish_run(conn, run_id, "ok", summary)
         return summary
     except Exception as exc:

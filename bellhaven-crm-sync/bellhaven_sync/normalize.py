@@ -5,10 +5,11 @@ from difflib import SequenceMatcher
 STREET_WORDS = {
     "street": "st", "str": "st", "avenue": "ave", "av": "ave", "road": "rd", "drive": "dr",
     "boulevard": "blvd", "lane": "ln", "court": "ct", "place": "pl", "parkway": "pkwy",
-    "highway": "hwy", "circle": "cir", "terrace": "ter", "trail": "trl", "square": "sq",
+    "highway": "hwy", "circle": "cir", "terrace": "ter", "trail": "trl", "square": "sq", "pk": "pike",
     "north": "n", "south": "s", "east": "e", "west": "w",
     "northeast": "ne", "northwest": "nw", "southeast": "se", "southwest": "sw",
 }
+PO_BOX_RE = re.compile(r"^\s*p\.?\s*o\.?\s*box\b", re.I)
 UNIT_RE = re.compile(r"(\b(suite|ste|unit|apt|bldg|building)\b|#)\s*[\w-]+$")
 
 # Words that say what kind of place it is, not which place it is.
@@ -81,3 +82,11 @@ def similarity(a, b):
 def phone(p):
     digits = re.sub(r"\D", "", p or "")
     return digits[-10:] if len(digits) >= 10 else ""
+
+
+def is_po_box(address):
+    return bool(PO_BOX_RE.match(address or ""))
+
+
+def person(name):
+    return clean(name)

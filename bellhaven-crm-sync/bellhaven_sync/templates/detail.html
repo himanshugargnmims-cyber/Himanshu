@@ -59,10 +59,10 @@
 {% endif %}
 
 <div class="card">
-  {% if p.status == 'pending' or (p.status == 'approved' and p.result and p.result.error) %}
+  {% if p.status in ('pending', 'failed') %}
   <form method="post" action="{{ url_for('approve', pid=p.id) }}" style="display:inline">
     <input type="text" name="note" placeholder="Optional reviewer note" value="{{ p.decision_note or '' }}">
-    <button class="approve">{{ 'Retry write' if p.status == 'approved' else 'Approve & write to CRM' }}</button>
+    <button class="approve">{{ 'Retry write (continues from saved progress)' if p.status == 'failed' else 'Approve & write to CRM' }}</button>
   </form>
   {% endif %}
   {% if p.status == 'pending' %}

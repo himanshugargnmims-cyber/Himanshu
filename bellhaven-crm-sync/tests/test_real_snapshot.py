@@ -77,8 +77,8 @@ def test_billing_sop(result):
 def test_sandusky_points_at_existing_millstone_account(result):
     _, _, by_acct = result
     p = kind(by_acct, "001SXSF4ELF0Z2LGDM")
-    assert p["kind"] == "moved_away" and p["action"]["sop_path"] == "chow"
-    assert p["action"]["chow_target_id"] == MILLSTONE_SANDUSKY
+    assert p["kind"] == "moved_away" and p["action"]["op"] == "chow_pointer"
+    assert p["action"]["chow_target_id"] == MILLSTONE_SANDUSKY and p["evidence"]["sop"]["path"] == "chow"
 
 
 def test_duplicates_point_at_one_survivor_per_facility(result):
@@ -106,23 +106,30 @@ def test_field_fixes(result):
     assert kind(by_acct, "0017MN2JYAJBDS8WQZ")["action"]["set"] == {"name": "Bellhaven Willow Creek"}
 
 
-def test_unlisted_and_absorbed(result):
+def test_unlisted_and_acquired_operators(result):
     _, _, by_acct = result
     for gone in ("00116ETS45BL7DTQP7", "0016PVXH4B25HWR7QE"):  # Alliance, Coldwater
         p = kind(by_acct, gone)
         assert p["kind"] == "not_on_website" and p["action"]["set"] == {"status": "Needs Review"}
-    harborview = kind(by_acct, "001FJZYHR7MLFMNPLL")
-    assert harborview["kind"] == "parent_absorbed"
-    assert "001FWSQ30SFW6S7604" not in by_acct  # Cedar Trail keeps CHOW history accounts; only "select communities" left
+    for operator in ("001FJZYHR7MLFMNPLL", "001FWSQ30SFW6S7604"):  # Harborview, Cedar Trail: note only, status untouched
+        p = kind(by_acct, operator)
+        assert p["kind"] == "operator_note" and p["action"]["set"] == {} and "About page" in p["action"]["note"]
+    for untouched in ("00139TNDS8HNLUZ5A6", "001DAAUWV2J3SHQJ34", "001YRHHXQ5HJ0TCL2U"):  # not mentioned on About page
+        assert untouched not in by_acct
+
+
+def test_incomplete_scrape_suppresses_gone_checks():
+    proposals, _ = matcher.build_proposals(SITE["locations"], ACCOUNTS, CONTACTS, SITE["about_text"], site_complete=False)
+    assert not [p for p in proposals if p["kind"] in ("not_on_website", "moved_away")]
 
 
 def test_full_approval_end_state_and_idempotent_rerun():
     crm = FakeCRM(ACCOUNTS, CONTACTS)
     conn = store.connect(":memory:")
     first = pipeline.run(client=crm, conn=conn, site=SITE)
-    assert first["new_for_review"] == 30
+    assert first["new_for_review"] == 31
     for p in store.list_proposals(conn, store.PENDING):
-        store.set_status(conn, p["id"], store.APPROVED)
+        assert store.claim(conn, p["id"])
         store.set_status(conn, p["id"], store.APPLIED, result=applier.apply_proposal(conn, crm, store.get_proposal(conn, p["id"])))
 
     acc = crm.accounts

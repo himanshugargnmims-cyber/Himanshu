@@ -9,7 +9,7 @@
   {% else %}<span class="muted">No runs yet. Click "Run pipeline now".</span>{% endif %}
 </div>
 <div class="tabs card">
-  {% for s in ["pending", "applied", "rejected", "approved", "stale", "all"] %}
+  {% for s in ["pending", "applied", "rejected", "failed", "applying", "stale", "all"] %}
     <a href="{{ url_for('index', status=s) }}" class="{{ 'active' if s == status }}">{{ s }} ({{ counts.get(s, 0) if s != 'all' else counts.values()|sum }})</a>
   {% endfor %}
 </div>

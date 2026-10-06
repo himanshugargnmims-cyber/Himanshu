@@ -44,6 +44,10 @@ class CRMClient:
     def list_contacts(self):
         return self._list("/contacts")
 
+    def find_accounts(self, **filters):
+        """Server-side filtered search (q, city, state, zip, street, parent_id)."""
+        return self._request("GET", "/accounts", params={**filters, "page_size": 200})["data"]
+
     def get_account(self, account_id):
         return self._request("GET", f"/accounts/{account_id}")
 
@@ -58,6 +62,9 @@ class CRMClient:
         if bad:
             raise CRMError(f"Not settable via API: {sorted(bad)}")
         return self._request("POST", "/accounts", json=fields)
+
+    def get_contact(self, contact_id):
+        return self._request("GET", f"/contacts/{contact_id}")
 
     def update_contact(self, contact_id, fields):
         return self._request("PATCH", f"/contacts/{contact_id}", json=fields)

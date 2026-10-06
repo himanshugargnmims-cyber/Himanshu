@@ -19,6 +19,19 @@ class FakeCRM:
     def list_contacts(self):
         return copy.deepcopy(list(self.contacts.values()))
 
+    def find_accounts(self, **filters):
+        out = []
+        for a in self.accounts.values():
+            if filters.get("zip") and filters["zip"] not in a["billing_zip"]:
+                continue
+            if filters.get("parent_id") and a["parent_id"] != filters["parent_id"]:
+                continue
+            out.append(copy.deepcopy(a))
+        return out
+
+    def get_contact(self, contact_id):
+        return copy.deepcopy(self.contacts[contact_id])
+
     def get_account(self, account_id):
         if account_id not in self.accounts:
             raise CRMError("Account not found")

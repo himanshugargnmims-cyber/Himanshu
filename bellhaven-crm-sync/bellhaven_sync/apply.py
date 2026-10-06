@@ -1,14 +1,24 @@
 """Execute an approved proposal against the CRM.
 
 Only this module writes to the CRM, and only the review app calls it, after a
-human clicks Approve. Every write re-reads the account first and refuses to
-proceed if the CRM no longer looks the way it did when the proposal was made.
-Every step is safe to retry: values already in place are skipped, and a
-created account id is saved before the next step runs.
+human clicks Approve. Before writing it re-reads the account and refuses if the
+CRM no longer looks the way it did when the proposal was made. Every step is
+safe to retry: values already in place are skipped, a create first looks for
+an account already at that address, and a created id is saved before the next
+step runs.
+
+Ops:
+  update        PATCH fields on one account (+ note, + move a duplicate's contacts)
+  create        new account for a website location
+  reparent      move an account to a new parent, via the billing SOP
+                (direct re-parent, or CHOW: new account + pointer on the old one)
+  chow_pointer  SOP CHOW where the current-owner account already exists:
+                set only chow_current_account on the old account
 """
 from datetime import date
 
 from . import config, store
+from . import normalize as N
 
 DIRECT = "direct"
 CHOW = "chow"
@@ -63,6 +73,31 @@ def _check_expected(account, expect):
         raise PreconditionFailed(f"CRM changed since this proposal was made: {drift}")
 
 
+def _require_sop(account, wanted):
+    path_now = sop_path(account)
+    if path_now != wanted:
+        raise PreconditionFailed(
+            f"Billing data changed: SOP path is now '{path_now}', proposal was '{wanted}'. "
+            "Re-run the pipeline for a fresh proposal."
+        )
+
+
+def _existing_at_address(client, fields):
+    """An account already under the target parent at this street + ZIP (a lost-response retry, or a rep got there first)."""
+    for a in client.find_accounts(zip=N.zip5(fields["billing_zip"]), parent_id=fields["parent_id"]):
+        if N.street(a.get("billing_street")) == N.street(fields["billing_street"]):
+            return a
+    return None
+
+
+def _create_once(client, fields, note):
+    existing = _existing_at_address(client, fields)
+    if existing:
+        return existing[ID], {"reused_existing_account": existing[ID]}
+    created = client.create_account({**fields, "note": append_note(None, note)})
+    return created[ID], {"created": created}
+
+
 def _update(client, account, set_fields, note, expect):
     """PATCH only what is not already in place; append the note once."""
     pending = {k: v for k, v in set_fields.items() if not same(account.get(k), v)}
@@ -78,73 +113,81 @@ def _update(client, account, set_fields, note, expect):
     return {"account_id": account[ID], "fields": fields, "after": after}
 
 
-def _save_progress(conn, proposal, result):
-    if conn is not None and proposal.get("id") is not None:
-        store.set_status(conn, proposal["id"], store.APPROVED, result=result)
+def _move_contacts(client, contact_ids, from_id, to_id):
+    moved, skipped = [], []
+    for cid in contact_ids:
+        contact = client.get_contact(cid)
+        if contact["account_id"] == from_id:
+            client.update_contact(cid, {"account_id": to_id})
+            moved.append(cid)
+        elif contact["account_id"] != to_id:  # a rep moved it elsewhere since: leave it there
+            skipped.append(cid)
+    return moved, skipped
+
+
+def _set_pointer(client, account, target_id):
+    current = account.get("chow_current_account")
+    if same(current, target_id):
+        return {"skipped": "CHOW pointer already set", "old_account_id": account[ID], "chow_current_account": target_id}
+    if current:
+        raise PreconditionFailed(f"{account[ID]} already points at {current}; refusing to overwrite with {target_id}.")
+    after = client.update_account(account[ID], {"chow_current_account": target_id})
+    return {"old_account_id": account[ID], "chow_current_account": target_id, "old_after": after}
 
 
 def apply_proposal(conn, client, proposal):
     """Write one approved proposal. Returns a result dict; raises on failure."""
     action = proposal["action"]
-    prior = dict(proposal.get("result") or {})
-    prior.pop("error", None)
-    prior.pop("trace", None)
+    prior = {k: v for k, v in (proposal.get("result") or {}).items() if k not in ("error", "trace")}
     op = action["op"]
 
+    def save(progress):
+        if conn is not None and proposal.get("id") is not None:
+            store.save_result(conn, proposal["id"], progress)
+
     if op == "create":
-        if prior.get("created_account_id"):  # retry after a partial failure
+        if prior.get("created_account_id"):
             return prior
-        fields = dict(action["fields"])
-        fields["note"] = append_note(None, action["note"])
-        created = client.create_account(fields)
-        result = {"created_account_id": created[ID], "created": created}
-        _save_progress(conn, proposal, result)
+        new_id, info = _create_once(client, action["fields"], action["note"])
+        result = {"created_account_id": new_id, **info}
+        save(result)
         return result
 
     account = client.get_account(action["account_id"])
 
     if op == "update":
         result = _update(client, account, action.get("set", {}), action.get("note"), action.get("expect", {}))
-        moved = []
-        for contact_id in action.get("move_contacts", []):
-            client.update_contact(contact_id, {"account_id": action["move_contacts_to"]})
-            moved.append(contact_id)
-        if moved:
-            result["moved_contacts"] = moved
+        if action.get("move_contacts"):
+            moved, skipped = _move_contacts(client, action["move_contacts"], account[ID], action["move_contacts_to"])
+            result.update(moved_contacts=moved, contacts_left_in_place=skipped)
         return result
 
+    if op == "chow_pointer":
+        if not same(account.get("chow_current_account"), action["chow_target_id"]):
+            _check_expected(account, action.get("expect", {}))
+            _require_sop(account, CHOW)
+        return {"sop_path": CHOW, **_set_pointer(client, account, action["chow_target_id"])}
+
     if op == "reparent":
-        target_parent = action["new_parent_id"]
-        if same(account.get("parent_id"), target_parent):
+        new_id = prior.get("created_account_id")
+        if new_id:  # a CHOW already created the new account: finish it, whatever billing did since
+            return {**prior, **_set_pointer(client, account, new_id)}
+        if same(account.get("parent_id"), action["new_parent_id"]):
             return {"skipped": "already under target parent", "account_id": account[ID]}
-        if account.get("chow_current_account") and action["sop_path"] == CHOW:
-            if prior.get("created_account_id") or action.get("chow_target_id"):
-                return {**prior, "skipped": "CHOW pointer already set", "old_account_id": account[ID]}
         _check_expected(account, action.get("expect", {}))
-        # Re-evaluate the SOP on live billing data: the reviewer approved a specific path.
-        path_now = sop_path(account)
-        if path_now != action["sop_path"]:
-            raise PreconditionFailed(
-                f"Billing data changed: SOP path is now '{path_now}', proposal was '{action['sop_path']}'. "
-                "Re-run the pipeline to get a fresh proposal."
-            )
-        if path_now == DIRECT:
-            fields = {"parent_id": target_parent, **action.get("set", {})}
+        _require_sop(account, action["sop_path"])
+
+        if action["sop_path"] == DIRECT:
+            fields = {"parent_id": action["new_parent_id"], **action.get("set", {})}
             fields["note"] = append_note(account.get("note"), action["note"])
             after = client.update_account(account[ID], fields)
             return {"sop_path": DIRECT, "account_id": account[ID], "fields": fields, "after": after}
 
-        # CHOW. The old account keeps every field as-is except the pointer.
-        new_id = action.get("chow_target_id") or prior.get("created_account_id")
-        if not new_id:
-            fields = dict(action["new_account"])
-            fields["parent_id"] = target_parent
-            fields["note"] = append_note(None, f"Created by CHOW from account {account[ID]}. {action['note']}")
-            created = client.create_account(fields)
-            new_id = created[ID]
-            prior = {"sop_path": CHOW, "created_account_id": new_id, "created": created}
-            _save_progress(conn, proposal, prior)
-        after = client.update_account(account[ID], {"chow_current_account": new_id})
-        return {**prior, "sop_path": CHOW, "chow_current_account": new_id, "old_account_id": account[ID], "old_after": after}
+        # CHOW: new account under the new parent; the old account keeps everything except the pointer.
+        new_fields = {**action["new_account"], "parent_id": action["new_parent_id"]}
+        new_id, info = _create_once(client, new_fields, f"Created by CHOW from account {account[ID]}. {action['note']}")
+        progress = {"sop_path": CHOW, "created_account_id": new_id, **info}
+        save(progress)
+        return {**progress, **_set_pointer(client, account, new_id)}
 
     raise ValueError(f"Unknown op {op!r}")

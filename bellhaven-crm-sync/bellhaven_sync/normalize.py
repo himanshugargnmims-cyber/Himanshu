@@ -9,7 +9,10 @@ STREET_WORDS = {
     "north": "n", "south": "s", "east": "e", "west": "w",
     "northeast": "ne", "northwest": "nw", "southeast": "se", "southwest": "sw",
 }
-PO_BOX_RE = re.compile(r"^\s*p\.?\s*o\.?\s*box\b", re.I)
+# Abbreviations inside street NAMES (not street types or directions).
+NAME_WORDS = {"point": "pt", "saint": "st", "mount": "mt", "route": "rte", "fort": "ft",
+              "first": "1st", "second": "2nd", "third": "3rd", "fourth": "4th", "fifth": "5th"}
+PO_BOX_RE = re.compile(r"^\s*((p\.?\s*o\.?|post\s+office)\s*(box|drawer)|box\s+\d|pmb\b)", re.I)
 UNIT_RE = re.compile(r"(\b(suite|ste|unit|apt|bldg|building)\b|#)\s*[\w-]+$")
 
 # Words that say what kind of place it is, not which place it is.
@@ -45,7 +48,7 @@ def street(address):
     """'123 N. Maple Grove Road, Suite 4' -> '123 n maple grove rd'."""
     text = clean((address or "").split(",")[0])
     text = UNIT_RE.sub("", text).strip()
-    return " ".join(STREET_WORDS.get(w, w) for w in text.replace("-", " ").split())
+    return " ".join(STREET_WORDS.get(w, NAME_WORDS.get(w, w)) for w in text.replace("-", " ").split())
 
 
 def street_number(address):
@@ -90,3 +93,21 @@ def is_po_box(address):
 
 def person(name):
     return clean(name)
+
+
+DIRECTIONS = {"n", "s", "e", "w", "ne", "nw", "se", "sw"}
+STREET_TYPES = set(STREET_WORDS.values()) - DIRECTIONS | {"way", "pike", "row", "run", "xing"}
+
+
+def street_variant(a, b):
+    """Same street spelled differently? Number, direction and street type must agree;
+    only the street name may differ slightly ('Colegate' vs 'Colgate'), never 'Oak St' vs 'Oak Ave'."""
+    ta, tb = a.split(), b.split()
+    if not ta or not tb or ta[0] != tb[0] or not ta[0].isdigit():
+        return False
+    rest_a, rest_b = ta[1:], tb[1:]
+    pick = lambda toks, kind: {t for t in toks if t in kind}
+    if pick(rest_a, DIRECTIONS) != pick(rest_b, DIRECTIONS) or pick(rest_a, STREET_TYPES) != pick(rest_b, STREET_TYPES):
+        return False
+    core = lambda toks: " ".join(t for t in toks if t not in DIRECTIONS and t not in STREET_TYPES)
+    return similarity(core(rest_a), core(rest_b)) >= 0.85

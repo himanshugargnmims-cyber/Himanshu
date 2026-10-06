@@ -26,6 +26,12 @@ def _previous_location_count(conn):
     return None
 
 
+def _touches(p):
+    a = p["action"]
+    return set(filter(None, [a.get("account_id"), a.get("chow_target_id"), a.get("move_contacts_to"),
+                             (a.get("set") or {}).get("duplicate_of_account")]))
+
+
 def run(client=None, conn=None, site=None):
     """site: optional pre-scraped {"locations", "about_text", "claimed_count"} (tests / replays)."""
     conn = conn or store.connect()
@@ -38,9 +44,21 @@ def run(client=None, conn=None, site=None):
         if not locations or (prev and len(locations) < prev * MIN_FRACTION_OF_LAST_RUN):
             raise ScrapeLooksBroken(f"Scraped {len(locations)} locations (last good run: {prev}). Aborting.")
 
+        # Fewer communities than the website itself claims => we may have missed some; then do not
+        # infer "no longer on the website" for anything.
+        claims = [c for c in (site.get("claimed_count"), site.get("directory_claim")) if c]
+        site_complete = all(len(locations) >= c for c in claims)
+
         accounts = client.list_accounts()
         contacts = client.list_contacts()
-        proposals, report = matcher.build_proposals(locations, accounts, contacts, site.get("about_text", ""))
+        proposals, report = matcher.build_proposals(
+            locations, accounts, contacts, site.get("about_text", ""), site_complete=site_complete)
+
+        # Never propose around a write that was approved but has not finished (e.g. a CHOW whose
+        # pointer step failed): the half-written state would look like a duplicate.
+        busy = store.in_flight_account_ids(conn)
+        held_back = [p for p in proposals if _touches(p) & busy]
+        proposals = [p for p in proposals if not (_touches(p) & busy)]
         counts = store.upsert_proposals(conn, run_id, proposals)
 
         snapshot_dir = config.DB_PATH.parent / "snapshots"
@@ -60,8 +78,11 @@ def run(client=None, conn=None, site=None):
             "skipped_already_decided": counts["already_decided"],
             "marked_stale": counts["marked_stale"],
         }
-        if claimed and claimed != len(locations):
-            summary["warning"] = f"homepage claims {claimed} communities but {len(locations)} were found"
+        if not site_complete:
+            summary["warning"] = (f"website claims {claims} communities but {len(locations)} were found; "
+                                  "'not on website' checks skipped this run")
+        if held_back:
+            summary["held_back_for_in_flight_writes"] = len(held_back)
         store.finish_run(conn, run_id, "ok", summary)
         return summary
     except Exception as exc:

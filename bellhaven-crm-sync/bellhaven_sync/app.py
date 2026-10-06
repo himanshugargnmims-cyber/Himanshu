@@ -3,8 +3,9 @@
 Run:  BELLHAVEN_API_TOKEN=... python -m bellhaven_sync.app   ->  http://127.0.0.1:5000
 """
 import traceback
+from urllib.parse import urlparse
 
-from flask import Flask, redirect, render_template, request, url_for
+from flask import Flask, abort, redirect, render_template, request, url_for
 
 from . import apply as applier
 from . import pipeline, store
@@ -13,12 +14,21 @@ from .crm import CRMClient
 app = Flask(__name__)
 
 # Highest-stakes first: ownership moves and billing SOP, then dedupe, new accounts, field fixes.
-KIND_ORDER = ["reparent", "moved_away", "duplicate", "create", "rename", "update", "annotate",
-              "not_on_website", "parent_absorbed"]
+KIND_ORDER = ["reparent", "moved_away", "chow_duplicate", "duplicate", "create", "rename", "update", "annotate",
+              "not_on_website", "operator_note"]
 
 
 def db():
     return store.connect()
+
+
+@app.before_request
+def same_origin_posts_only():
+    """A page open in another tab must not be able to submit Approve for the reviewer."""
+    if request.method == "POST":
+        origin = request.headers.get("Origin") or request.headers.get("Referer")
+        if origin and urlparse(origin).netloc != request.host:
+            abort(403)
 
 
 @app.route("/")
@@ -45,28 +55,25 @@ def detail(pid):
 @app.post("/proposal/<int:pid>/approve")
 def approve(pid):
     conn = db()
-    p = store.get_proposal(conn, pid)
-    if p is None or p["status"] not in (store.PENDING, store.APPROVED):
-        return redirect(url_for("detail", pid=pid))
     note = request.form.get("note", "").strip() or None
-    store.set_status(conn, pid, store.APPROVED, note=note)
+    if not store.claim(conn, pid, note):  # already applying/applied/rejected (e.g. a double click)
+        return redirect(url_for("detail", pid=pid))
+    proposal = store.get_proposal(conn, pid)
     try:
-        result = applier.apply_proposal(conn, CRMClient(), store.get_proposal(conn, pid))
+        result = applier.apply_proposal(conn, CRMClient(), proposal)
         store.set_status(conn, pid, store.APPLIED, result=result)
     except applier.PreconditionFailed as exc:
-        store.set_status(conn, pid, store.STALE, result={"error": str(exc)})
-    except Exception as exc:  # keep it APPROVED so the reviewer can retry
-        prior = store.get_proposal(conn, pid)["result"] or {}
-        store.set_status(conn, pid, store.APPROVED, result={**prior, "error": str(exc), "trace": traceback.format_exc()})
+        saved = store.get_proposal(conn, pid)["result"] or {}
+        store.set_status(conn, pid, store.STALE, result={**saved, "error": str(exc)})
+    except Exception as exc:  # FAILED keeps saved progress so Retry continues where it stopped
+        saved = store.get_proposal(conn, pid)["result"] or {}
+        store.set_status(conn, pid, store.FAILED, result={**saved, "error": str(exc), "trace": traceback.format_exc()})
     return redirect(url_for("detail", pid=pid))
 
 
 @app.post("/proposal/<int:pid>/reject")
 def reject(pid):
-    conn = db()
-    p = store.get_proposal(conn, pid)
-    if p and p["status"] == store.PENDING:
-        store.set_status(conn, pid, store.REJECTED, note=request.form.get("note", "").strip() or None)
+    store.reject(db(), pid, request.form.get("note", "").strip() or None)
     return redirect(request.form.get("next") or url_for("index"))
 
 

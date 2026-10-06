@@ -1,26 +1,37 @@
 """SQLite state: pipeline runs, proposals and reviewer decisions.
 
 Idempotency rule: every proposal has a fingerprint built from *what* it would
-change (kind + subject + the exact target values). A re-run that produces the
-same fingerprint never creates a second row, and a fingerprint that already
-has a decision (approved / rejected / applied) is never shown again. If the
-underlying facts change (e.g. the website lists a new name), the fingerprint
-changes and the new proposal is reviewed on its own merits.
+change (kind + subject + the target values). A re-run that produces the same
+fingerprint never creates a second row, and a fingerprint that already has a
+decision is never shown again. If the underlying facts change (e.g. the website
+lists a new name), the fingerprint changes and the new proposal is reviewed on
+its own merits.
+
+Lifecycle:  pending --approve--> applying --> applied
+                                          \\-> failed  (retryable; partial results kept)
+                                          \\-> stale   (CRM changed under us; re-run proposes afresh)
+            pending --reject---> rejected
+            pending --(no longer produced by a run)--> stale
 """
 import hashlib
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from datetime import datetime, timezone
 
 from . import config
 
 PENDING = "pending"
-APPROVED = "approved"  # approved, write in progress or failed
-APPLIED = "applied"  # approved and written to the CRM
+APPLYING = "applying"  # claimed by one approval; write in progress
+APPLIED = "applied"
+FAILED = "failed"  # approved but the write errored; Retry continues from saved progress
 REJECTED = "rejected"
-STALE = "stale"  # pending, but the latest run no longer produces it
-DECIDED = (APPROVED, APPLIED, REJECTED)
+STALE = "stale"
+DECIDED = (APPLYING, APPLIED, FAILED, REJECTED)
+STUCK_AFTER = timedelta(minutes=10)  # an 'applying' row older than this can be re-claimed
+
+# Free text and lists that can change for cosmetic reasons are not part of the decision.
+NOT_FINGERPRINTED = ("expect", "note", "move_contacts")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -59,19 +70,15 @@ def connect(path=None):
     path = path or config.DB_PATH
     if str(path) != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     return conn
 
 
 def fingerprint(kind, subject, action):
-    """Stable hash of what a proposal would do.
-
-    Evidence and the 'expect' precondition (current CRM values) are excluded:
-    the decision is about the target state, not about today's snapshot.
-    """
-    target = {k: v for k, v in action.items() if k != "expect"}
+    """Stable hash of what a proposal would do (target values only)."""
+    target = {k: v for k, v in action.items() if k not in NOT_FINGERPRINTED}
     payload = json.dumps([kind, subject, target], sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()[:20]
 
@@ -113,10 +120,12 @@ def upsert_proposals(conn, run_id, proposals):
         elif row["status"] in DECIDED:
             conn.execute("UPDATE proposals SET last_seen_run=? WHERE id=?", (run_id, row["id"]))
             counts["already_decided"] += 1
-        else:  # pending or stale: refresh evidence so the reviewer sees today's facts
+        else:  # pending or stale: refresh to today's facts (incl. the 'expect' precondition)
             conn.execute(
-                "UPDATE proposals SET status=?, evidence_json=?, title=?, confidence=?, last_seen_run=? WHERE id=?",
-                (PENDING, json.dumps(p["evidence"]), p["title"], p["confidence"], run_id, row["id"]),
+                """UPDATE proposals SET status=?, action_json=?, evidence_json=?, title=?, confidence=?,
+                   last_seen_run=? WHERE id=?""",
+                (PENDING, json.dumps(p["action"]), json.dumps(p["evidence"]), p["title"], p["confidence"],
+                 run_id, row["id"]),
             )
             counts["still_pending"] += 1
 
@@ -127,6 +136,59 @@ def upsert_proposals(conn, run_id, proposals):
             counts["marked_stale"] += 1
     conn.commit()
     return counts
+
+
+def claim(conn, proposal_id, note=None):
+    """Atomically move a proposal into 'applying'. False if someone else already has it."""
+    stuck_before = (datetime.now(timezone.utc) - STUCK_AFTER).isoformat(timespec="seconds")
+    cur = conn.execute(
+        """UPDATE proposals SET status=?, decided_at=?, decision_note=COALESCE(?, decision_note)
+           WHERE id=? AND (status IN (?, ?) OR (status=? AND decided_at < ?))""",
+        (APPLYING, now(), note, proposal_id, PENDING, FAILED, APPLYING, stuck_before),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def save_result(conn, proposal_id, result):
+    """Persist partial progress (e.g. a created account id) without changing status."""
+    conn.execute("UPDATE proposals SET result_json=? WHERE id=?", (json.dumps(result), proposal_id))
+    conn.commit()
+
+
+def set_status(conn, proposal_id, status, note=None, result=None):
+    fields = {"status": status}
+    if status in DECIDED and status != APPLIED:
+        fields["decided_at"] = now()
+    if note is not None:
+        fields["decision_note"] = note
+    if result is not None:
+        fields["result_json"] = json.dumps(result)
+    if status == APPLIED:
+        fields["applied_at"] = now()
+    sets = ", ".join(f"{k}=?" for k in fields)
+    conn.execute(f"UPDATE proposals SET {sets} WHERE id=?", (*fields.values(), proposal_id))
+    conn.commit()
+
+
+def reject(conn, proposal_id, note=None):
+    cur = conn.execute(
+        "UPDATE proposals SET status=?, decided_at=?, decision_note=? WHERE id=? AND status=?",
+        (REJECTED, now(), note, proposal_id, PENDING),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def in_flight_account_ids(conn):
+    """Accounts touched by approved-but-unfinished writes; the matcher must not propose around them."""
+    ids = set()
+    stale_with_writes = [p for p in list_proposals(conn, STALE) if (p["result"] or {}).get("created_account_id")]
+    for p in list_proposals(conn, APPLYING) + list_proposals(conn, FAILED) + stale_with_writes:
+        a, r = p["action"], p["result"] or {}
+        ids.update(filter(None, [a.get("account_id"), a.get("chow_target_id"), a.get("move_contacts_to"),
+                                 (a.get("set") or {}).get("duplicate_of_account"), r.get("created_account_id")]))
+    return ids
 
 
 def list_proposals(conn, status=None):
@@ -140,21 +202,6 @@ def list_proposals(conn, status=None):
 def get_proposal(conn, proposal_id):
     row = conn.execute("SELECT * FROM proposals WHERE id=?", (proposal_id,)).fetchone()
     return _hydrate(row) if row else None
-
-
-def set_status(conn, proposal_id, status, note=None, result=None):
-    fields = {"status": status}
-    if status in DECIDED:
-        fields["decided_at"] = now()
-    if note is not None:
-        fields["decision_note"] = note
-    if result is not None:
-        fields["result_json"] = json.dumps(result)
-    if status == APPLIED:
-        fields["applied_at"] = now()
-    sets = ", ".join(f"{k}=?" for k in fields)
-    conn.execute(f"UPDATE proposals SET {sets} WHERE id=?", (*fields.values(), proposal_id))
-    conn.commit()
 
 
 def latest_run(conn):

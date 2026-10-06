@@ -30,8 +30,11 @@ The website lists 35 communities; the CRM has 121 accounts (6 parent companies).
 
 1. **A**: street address matches (after normalising "Road/Rd", "Northwest/NW", "Pk/Pike", suite numbers) and ZIP or city matches. City is enough when the ZIP is a typo.
 2. **B**: street number + ZIP match and the street name is similar.
+2b. B also requires the same street number, direction and street type, so "100 Oak St" never matches "100 Oak Ave" and "E Main" never matches "W Main".
 3. **C**: same name and city, but the address differs. This counts only if the website phone or the website's named administrator (a CRM contact) confirms it.
-4. **Lookalike**: a similar name without A/B/C. Never linked; shown to the reviewer as evidence.
+4. **D**: same name and city, account already under Bellhaven, but the address differs and nothing confirms it. Linked at *low* confidence so the reviewer checks it, rather than creating a duplicate.
+5. **Lookalike**: a similar name without A–D. Never linked; shown to the reviewer as evidence.
+6. Communities that share one street address on the website are matched by name and never auto-merged.
 
 Phones in the CRM are unreliable (many don't match the website). So a matching phone counts as evidence, but a mismatch is never held against a match.
 
@@ -43,7 +46,7 @@ Phones in the CRM are unreliable (many don't match the website). So a matching p
 | CHOW | Bellhaven of Marietta, Bellhaven of Tiffin (Cedar Trail) | New account under Bellhaven; old account gets only `chow_current_account` | Revenue history AND AR > 0. |
 | Direct re-parent | Crossings of Lima (Harborview), Cedar Trail of Zanesville | Re-parent (+ rename Zanesville) | No AR, or no revenue. |
 | Sold away | Bellhaven of Sandusky (rev 130k, AR 5.2k) | `chow_current_account` → existing *Millstone Care of Sandusky* | Not on the website; Millstone has an account at the identical address. It has AR, so the old account must not move. The new owner's account already exists, so I point at it instead of creating a duplicate. |
-| Triple duplicates | Kettering (no parent / Cedar Trail / Harborview), Monroe (Bellhaven / Cedar Trail / Harborview) | Keep one, others `duplicate_of_account` + Inactive; rename/re-parent the survivor | Same street address. Survivor rule: billing history, then match strength, then phone/admin confirmation, then already under Bellhaven, then Active, then contacts, then lowest id. |
+| Triple duplicates | Kettering (no parent / Cedar Trail / Harborview), Monroe (Bellhaven / Cedar Trail / Harborview) | Keep one, others `duplicate_of_account` + Inactive; rename/re-parent the survivor | Same street address. Survivor rule: an existing duplicate pointer, then match strength, then already under Bellhaven, then phone/admin confirmation, then Active, then billing history, then contacts, then lowest id. If a losing copy under the old owner carries revenue AND AR, it is not deactivated: it gets a CHOW pointer to the live account (SOP: leave it as is). None in today's data. |
 | Duplicates across old owners | Port Clinton, Shores of Erie (Harborview copies) | Harborview copies → duplicates of the Bellhaven ones | The Bellhaven copies carry the website administrator as a contact. |
 | Duplicate within Bellhaven | Bellhaven of Owosso ×2 | Keep the copy whose phone and administrator match the website; move the other copy's contact to it | Reps keep the admissions director's contact. |
 | Rebrands / outdated names | Riverbend Manor → Bellhaven of Chagrin Falls; Sunny Acres → Bellhaven Willow Creek; Chesterton Senior Commons → Bellhaven of Chesterton; 4 minor spelling fixes | Rename | Same address; Chagrin Falls and Chesterton are also confirmed by the administrator contact. |
@@ -54,7 +57,7 @@ Phones in the CRM are unreliable (many don't match the website). So a matching p
 | Lookalike, same city | *Maplewood Senior Care Center* (Stonebridge, 431 Main St) | Not linked, not a duplicate | Different street address from Bellhaven of Maplewood. |
 | New facilities | Bellhaven of Batavia, Bellhaven of Carlisle | Create | No account at the address; Carlisle PA is not New Carlisle OH. |
 | Under Bellhaven, not on website | Bellhaven Care Center of Alliance, Bellhaven of Coldwater | Status Needs Review + note; parent unchanged | Not listed and no other operator's account at the address, so the new owner (or closure) is unknown. Moving the parent would be a guess; Inactive would claim a closure I can't see. |
-| Absorbed operator | Harborview Care Group (Parent Account) | Inactive + note quoting the About page | Every Harborview facility is now a Bellhaven community, and the About page says so. Reps should route through Bellhaven corporate. Cedar Trail stays: only "select communities" moved and its CHOW history accounts remain. |
+| Acquired operators | Harborview Care Group, Cedar Trail Communities (parent accounts) | Note quoting the About page; **status unchanged** | The About sentence proves the communities moved, not that the companies ceased to exist, and the brief never asks to deactivate parent companies. My first version set Harborview Inactive; independent review flagged that as an unprovable claim, and I changed it. |
 | Already right | 16 locations | No write | Includes Bellhaven Terrace of Akron, which has AR but is already under Bellhaven, so there's no move and no SOP. |
 
 ## SOP handling
@@ -66,7 +69,10 @@ Phones in the CRM are unreliable (many don't match the website). So a matching p
 
 ## Re-run safety
 
-- Each proposal's fingerprint = hash(kind, subject, target values), **excluding** today's CRM values and evidence. Re-runs never duplicate a pending item. Approved/rejected items are skipped forever.
+- Each proposal's fingerprint = hash(kind, subject, target values), **excluding** today's CRM values, notes and evidence. Re-runs never duplicate a pending item. Approved/rejected items are skipped forever, even after the survivor they mention is renamed.
+- Approving is an atomic claim (`pending → applying`), so a double click cannot write twice. A failed write keeps its progress (e.g. a created account id), and Retry continues from there. Creates first look for an account already at that address under the target parent, which covers a response lost after the CRM committed.
+- While a write is unfinished, the daily run holds back any proposal touching the same accounts. Otherwise half-written state (a new CHOW account without its pointer) would look like a duplicate.
+- If the scrape finds fewer communities than the website claims (homepage "35", directory "34 listed"), "not on website" checks are skipped for that run.
 - After approval the CRM agrees with the website, so the matcher generates nothing for those items in the first place. A test replays the real snapshot: approve all 30, re-run, 0 proposals.
 - Pending items that a later run no longer produces become *stale* and drop out of the queue, so a reviewer never approves something the data no longer supports.
 - If a scrape returns fewer than half of the last run's locations, the run aborts. Otherwise an outage would flag every account "not on website".
@@ -77,7 +83,7 @@ Phones in the CRM are unreliable (many don't match the website). So a matching p
 1. **PO Box (Ashtabula)**: I kept the billing address. The alternative is to overwrite it with the street address and keep the PO Box in the note.
 2. **Not on website → Needs Review, not Inactive**: I chose not to assert a closure or sale I can't see.
 3. **Sandusky**: I pointed the CHOW at the existing Millstone account instead of creating a new one. Creating one would satisfy the SOP's wording but leave two Millstone accounts for one facility.
-4. **Harborview parent → Inactive**: the alternative is to parent it under Bellhaven as a subsidiary. I chose Inactive because outreach should no longer go through it.
+4. **Harborview parent**: I left its status alone and added a note quoting the About page. Setting it Inactive is the alternative if you know the company was dissolved.
 5. **Kettering survivor**: no copy had billing, contacts or a confirming phone/administrator, so the choice is deterministic but arbitrary (most complete address, then lowest id).
 6. **Phones not updated**: CRM phones disagree with the website for most facilities, and they may be billing or main-office lines. I didn't propose mass phone changes the brief didn't ask for.
 
@@ -90,7 +96,13 @@ Phones in the CRM are unreliable (many don't match the website). So a matching p
 
 ## Verification
 
-_(to be filled in from the verification run)_
+1. **Blind re-derivation.** Three agents each took a third of the website, read only the raw website/CRM data and the rules, and wrote down the correct end state. A judge per slice compared that with my proposals and argued against mine.
+   - 42 items agreed.
+   - **No dispute changed a scored field.**
+   - Remaining disputes were judgment calls (phones, extra notes, the Kettering survivor, PO Box handling) or artefacts of the summary I gave the judges.
+   - The Harborview deactivation was flagged as an unprovable claim, and I changed it to a note.
+2. **Code review.** Two reviewers attacked the write path and the matcher and found 1 critical and about 15 major or minor defects, almost all of which reproduced. The headline one: a double-clicked Approve could create two accounts. Every finding I fixed has a regression test (`tests/test_pipeline.py`, section "regressions from the code review").
+3. **Re-review of the fixes.** _(see below)_
 
 ## Limitations / what I'd do next in production
 

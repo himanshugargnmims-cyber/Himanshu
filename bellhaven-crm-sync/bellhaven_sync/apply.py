@@ -82,16 +82,36 @@ def _require_sop(account, wanted):
         )
 
 
-def _existing_at_address(client, fields):
-    """An account already under the target parent at this street + ZIP (a lost-response retry, or a rep got there first)."""
+def _existing_copy(client, fields, exclude_id=None):
+    """The very account this create would make, if it already exists: same parent, name, street and ZIP,
+    live and unflagged. Catches a retry after a lost response (or a rep who got there first) without
+    ever adopting a different community that happens to share the address. Filters client-side too."""
     for a in client.find_accounts(zip=N.zip5(fields["billing_zip"]), parent_id=fields["parent_id"]):
-        if N.street(a.get("billing_street")) == N.street(fields["billing_street"]):
+        if (a.get("parent_id") == fields["parent_id"] and a[ID] != exclude_id and a.get("status") == "Active"
+                and not a.get("duplicate_of_account") and not a.get("chow_current_account")
+                and N.clean(a.get("name")) == N.clean(fields["name"])
+                and N.street(a.get("billing_street")) == N.street(fields["billing_street"])
+                and N.zip5(a.get("billing_zip")) == N.zip5(fields["billing_zip"])):
             return a
     return None
 
 
-def _create_once(client, fields, note):
-    existing = _existing_at_address(client, fields)
+def _check_target(client, target_id, parent_id=None):
+    """A pointer target (duplicate survivor, CHOW current account) must be a live, unflagged record."""
+    t = client.get_account(target_id)
+    problems = []
+    if t.get("status") != "Active":
+        problems.append(f"status is {t.get('status')}")
+    if t.get("duplicate_of_account") or t.get("chow_current_account"):
+        problems.append("it is itself flagged as duplicate/CHOW'd")
+    if parent_id and t.get("parent_id") != parent_id:
+        problems.append(f"it is not under {parent_id} yet (approve its own move first)")
+    if problems:
+        raise PreconditionFailed(f"Target {target_id} is not a valid live record: {'; '.join(problems)}.")
+
+
+def _create_once(client, fields, note, exclude_id=None):
+    existing = _existing_copy(client, fields, exclude_id)
     if existing:
         return existing[ID], {"reused_existing_account": existing[ID]}
     created = client.create_account({**fields, "note": append_note(None, note)})
@@ -156,7 +176,13 @@ def apply_proposal(conn, client, proposal):
     account = client.get_account(action["account_id"])
 
     if op == "update":
-        result = _update(client, account, action.get("set", {}), action.get("note"), action.get("expect", {}))
+        set_fields = action.get("set", {})
+        if set_fields and any(not same(account.get(k), v) for k, v in set_fields.items()):
+            if action.get("survivor_check"):
+                _check_target(client, **action["survivor_check"])
+            if action.get("sop_path"):  # retiring an old owner's copy: only if billing still allows it
+                _require_sop(account, action["sop_path"])
+        result = _update(client, account, set_fields, action.get("note"), action.get("expect", {}))
         if action.get("move_contacts"):
             moved, skipped = _move_contacts(client, action["move_contacts"], account[ID], action["move_contacts_to"])
             result.update(moved_contacts=moved, contacts_left_in_place=skipped)
@@ -166,12 +192,13 @@ def apply_proposal(conn, client, proposal):
         if not same(account.get("chow_current_account"), action["chow_target_id"]):
             _check_expected(account, action.get("expect", {}))
             _require_sop(account, CHOW)
+            _check_target(client, action["chow_target_id"])
         return {"sop_path": CHOW, **_set_pointer(client, account, action["chow_target_id"])}
 
     if op == "reparent":
         new_id = prior.get("created_account_id")
         if new_id:  # a CHOW already created the new account: finish it, whatever billing did since
-            return {**prior, **_set_pointer(client, account, new_id)}
+            return {**prior, **_set_pointer(client, client.get_account(account[ID]), new_id)}
         if same(account.get("parent_id"), action["new_parent_id"]):
             return {"skipped": "already under target parent", "account_id": account[ID]}
         _check_expected(account, action.get("expect", {}))
@@ -185,9 +212,10 @@ def apply_proposal(conn, client, proposal):
 
         # CHOW: new account under the new parent; the old account keeps everything except the pointer.
         new_fields = {**action["new_account"], "parent_id": action["new_parent_id"]}
-        new_id, info = _create_once(client, new_fields, f"Created by CHOW from account {account[ID]}. {action['note']}")
+        new_id, info = _create_once(client, new_fields, f"Created by CHOW from account {account[ID]}. {action['note']}",
+                                    exclude_id=account[ID])
         progress = {"sop_path": CHOW, "created_account_id": new_id, **info}
         save(progress)
-        return {**progress, **_set_pointer(client, account, new_id)}
+        return {**progress, **_set_pointer(client, client.get_account(account[ID]), new_id)}  # fresh read: no stale pointer check
 
     raise ValueError(f"Unknown op {op!r}")

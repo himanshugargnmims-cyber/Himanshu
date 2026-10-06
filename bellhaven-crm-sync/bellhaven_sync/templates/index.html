@@ -26,7 +26,8 @@
     <td>{{ p.status }}</td>
     <td style="white-space:nowrap">
       {% if p.status == 'pending' %}
-      <form method="post" action="{{ url_for('approve', pid=p.id) }}" style="display:inline"><button class="approve">Approve</button></form>
+      <form method="post" action="{{ url_for('approve', pid=p.id) }}" style="display:inline">
+        <input type="hidden" name="version" value="{{ p.version }}"><button class="approve">Approve</button></form>
       <form method="post" action="{{ url_for('reject', pid=p.id) }}" style="display:inline">
         <input type="hidden" name="next" value="{{ request.full_path }}"><button class="reject">Reject</button></form>
       {% endif %}

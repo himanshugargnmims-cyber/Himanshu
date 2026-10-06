@@ -59,15 +59,16 @@
 {% endif %}
 
 <div class="card">
-  {% if p.status in ('pending', 'failed') %}
+  {% if p.status in ('pending', 'failed') or stuck %}
   <form method="post" action="{{ url_for('approve', pid=p.id) }}" style="display:inline">
+    <input type="hidden" name="version" value="{{ version }}">
     <input type="text" name="note" placeholder="Optional reviewer note" value="{{ p.decision_note or '' }}">
-    <button class="approve">{{ 'Retry write (continues from saved progress)' if p.status == 'failed' else 'Approve & write to CRM' }}</button>
+    <button class="approve">{{ 'Retry write (continues from saved progress)' if p.status != 'pending' else 'Approve & write to CRM' }}</button>
   </form>
   {% endif %}
-  {% if p.status == 'pending' %}
+  {% if p.status in ('pending', 'failed', 'stale') %}
   <form method="post" action="{{ url_for('reject', pid=p.id) }}" style="display:inline">
-    <input type="hidden" name="note" value=""><button class="reject">Reject</button>
+    <input type="hidden" name="note" value=""><button class="reject">{{ 'Reject' if p.status == 'pending' else 'Abandon' }}</button>
   </form>
   {% endif %}
   {% if p.decision_note %}<p class="muted">Reviewer note: {{ p.decision_note }}</p>{% endif %}

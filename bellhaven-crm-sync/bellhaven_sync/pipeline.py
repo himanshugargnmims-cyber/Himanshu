@@ -81,6 +81,8 @@ def run(client=None, conn=None, site=None):
         if not site_complete:
             summary["warning"] = (f"website claims {claims} communities but {len(locations)} were found; "
                                   "'not on website' checks skipped this run")
+        if report["ambiguous"]:
+            summary["ambiguous_locations"] = report["ambiguous"]
         if held_back:
             summary["held_back_for_in_flight_writes"] = len(held_back)
         store.finish_run(conn, run_id, "ok", summary)

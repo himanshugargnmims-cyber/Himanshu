@@ -123,23 +123,39 @@ def upsert_proposals(conn, run_id, proposals):
         else:  # pending or stale: refresh to today's facts (incl. the 'expect' precondition)
             conn.execute(
                 """UPDATE proposals SET status=?, action_json=?, evidence_json=?, title=?, confidence=?,
-                   last_seen_run=? WHERE id=?""",
+                   last_seen_run=? WHERE id=? AND status IN (?, ?)""",  # never reopen a row claimed meanwhile
                 (PENDING, json.dumps(p["action"]), json.dumps(p["evidence"]), p["title"], p["confidence"],
-                 run_id, row["id"]),
+                 run_id, row["id"], PENDING, STALE),
             )
             counts["still_pending"] += 1
 
     # Pending items this run did not reproduce are no longer supported by the data.
     for row in conn.execute("SELECT id, fingerprint FROM proposals WHERE status=?", (PENDING,)).fetchall():
         if row["fingerprint"] not in seen:
-            conn.execute("UPDATE proposals SET status=? WHERE id=?", (STALE, row["id"]))
+            conn.execute("UPDATE proposals SET status=? WHERE id=? AND status=?", (STALE, row["id"], PENDING))
             counts["marked_stale"] += 1
     conn.commit()
     return counts
 
 
-def claim(conn, proposal_id, note=None):
-    """Atomically move a proposal into 'applying'. False if someone else already has it."""
+def action_version(action):
+    """Hash of the exact action a reviewer is looking at; Approve must present it."""
+    return hashlib.sha256(json.dumps(action, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+def is_stuck(p):
+    """An 'applying' row whose process died (crash, Ctrl-C, reloader) can be retried after a while."""
+    return p["status"] == APPLYING and p["decided_at"] and \
+        p["decided_at"] < (datetime.now(timezone.utc) - STUCK_AFTER).isoformat(timespec="seconds")
+
+
+def claim(conn, proposal_id, note=None, version=None):
+    """Atomically move a proposal into 'applying'. False if someone else has it, or if the action
+    changed since the reviewer looked at it (version mismatch)."""
+    if version is not None:
+        p = get_proposal(conn, proposal_id)
+        if p is None or action_version(p["action"]) != version:
+            return False
     stuck_before = (datetime.now(timezone.utc) - STUCK_AFTER).isoformat(timespec="seconds")
     cur = conn.execute(
         """UPDATE proposals SET status=?, decided_at=?, decision_note=COALESCE(?, decision_note)
@@ -172,9 +188,10 @@ def set_status(conn, proposal_id, status, note=None, result=None):
 
 
 def reject(conn, proposal_id, note=None):
+    """Reject a pending proposal, or abandon a failed/stale one (it then stops holding back its accounts)."""
     cur = conn.execute(
-        "UPDATE proposals SET status=?, decided_at=?, decision_note=? WHERE id=? AND status=?",
-        (REJECTED, now(), note, proposal_id, PENDING),
+        "UPDATE proposals SET status=?, decided_at=?, decision_note=? WHERE id=? AND status IN (?, ?, ?)",
+        (REJECTED, now(), note, proposal_id, PENDING, FAILED, STALE),
     )
     conn.commit()
     return cur.rowcount == 1

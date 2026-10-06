@@ -335,3 +335,60 @@ def test_review_app_rejects_cross_site_posts(world, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "t.db")
     client = review_app.app.test_client()
     assert client.post("/proposal/1/approve", headers={"Origin": "https://evil.example"}).status_code == 403
+
+
+def test_approve_requires_the_version_the_reviewer_saw(world):
+    crm, site = world
+    conn = store.connect(":memory:")
+    run(crm, site, conn)
+    p = store.list_proposals(conn, store.PENDING)[0]
+    assert store.claim(conn, p["id"], version="not-what-was-shown") is False
+    assert store.claim(conn, p["id"], version=store.action_version(p["action"])) is True
+
+
+def test_failed_write_can_be_abandoned_and_stops_holding_back(world):
+    crm, site = world
+    conn = store.connect(":memory:")
+    run(crm, site, conn)
+    p = next(x for x in store.list_proposals(conn) if x["account_id"] == "A3")
+    store.claim(conn, p["id"])
+    store.set_status(conn, p["id"], store.FAILED, result={"error": "422"})
+    assert "A3" in store.in_flight_account_ids(conn)
+    assert store.reject(conn, p["id"], "abandoned") is True
+    assert "A3" not in store.in_flight_account_ids(conn)
+
+
+def test_duplicate_refused_if_old_owner_copy_gained_ar():
+    accounts = [
+        {**acct("P1", "Bellhaven Senior Living (Parent Account)", "", parent=""), "care_type": ""},
+        {**acct("P2", "Harbor Group (Parent Account)", "", parent=""), "care_type": ""},
+        acct("B1", "Bellhaven of Port", "10 Harbor Dr"),
+        acct("H1", "Harbor Port Care", "10 Harbor Drive", parent="P2", rev=40000, ar=0),
+    ]
+    crm = FakeCRM(accounts)
+    proposals, _ = matcher.build_proposals([loc("Bellhaven of Port", "10 Harbor Dr")], crm.list_accounts())
+    dup = by_account(proposals)["H1"]
+    assert dup["kind"] == "duplicate"
+    crm.accounts["H1"]["outstanding_ar"] = 2500  # billing posts AR before approval
+    with pytest.raises(applier.PreconditionFailed):
+        applier.apply_proposal(None, crm, dup)
+    assert crm.accounts["H1"]["status"] == "Active"
+
+
+def test_create_does_not_adopt_a_colocated_sibling():
+    accounts = [{**acct("P1", "Bellhaven Senior Living (Parent Account)", "", parent=""), "care_type": ""}]
+    crm = FakeCRM(accounts)
+    locations = [loc("Bellhaven Woods of Toledo", "4850 Sylvania Ave"), loc("Bellhaven Memory Care of Toledo", "4850 Sylvania Ave")]
+    proposals, _ = matcher.build_proposals(locations, crm.list_accounts())
+    assert [p["kind"] for p in proposals] == ["create", "create"]
+    for p in proposals:
+        applier.apply_proposal(None, crm, p)
+    assert sorted(a["name"] for a in crm.accounts.values() if a["parent_id"] == "P1") == [
+        "Bellhaven Memory Care of Toledo", "Bellhaven Woods of Toledo"]
+
+
+def test_unknown_care_label_is_never_written():
+    accounts = [{**acct("P1", "Bellhaven Senior Living (Parent Account)", "", parent=""), "care_type": ""},
+                {**acct("A1", "Bellhaven at Maple Grove", "100 Maple Grove Rd"), "care_type": "Skilled Nursing"}]
+    proposals, _ = matcher.build_proposals([loc("Bellhaven at Maple Grove", "100 Maple Grove Rd", care_offerings=["Rehab & Skilled Nursing"])], accounts)
+    assert proposals == []

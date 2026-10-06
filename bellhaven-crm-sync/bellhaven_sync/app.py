@@ -2,6 +2,7 @@
 
 Run:  BELLHAVEN_API_TOKEN=... python -m bellhaven_sync.app   ->  http://127.0.0.1:5000
 """
+import os
 import traceback
 from urllib.parse import urlparse
 
@@ -22,9 +23,15 @@ def db():
     return store.connect()
 
 
+# The app only answers to these hosts (blocks DNS-rebinding pages), and POSTs must come from its own pages.
+ALLOWED_HOSTS = set(os.environ.get("BELLHAVEN_APP_HOSTS", "127.0.0.1:5000,localhost:5000,localhost").split(","))
+
+
 @app.before_request
 def same_origin_posts_only():
     """A page open in another tab must not be able to submit Approve for the reviewer."""
+    if request.host not in ALLOWED_HOSTS:
+        abort(403)
     if request.method == "POST":
         origin = request.headers.get("Origin") or request.headers.get("Referer")
         if origin and urlparse(origin).netloc != request.host:
@@ -37,6 +44,8 @@ def index():
     conn = db()
     proposals = store.list_proposals(conn, None if status == "all" else status)
     proposals.sort(key=lambda p: (KIND_ORDER.index(p["kind"]) if p["kind"] in KIND_ORDER else 99, p["id"]))
+    for p in proposals:
+        p["version"] = store.action_version(p["action"])
     return render_template(
         "index.html",
         proposals=proposals,
@@ -49,14 +58,17 @@ def index():
 @app.route("/proposal/<int:pid>")
 def detail(pid):
     p = store.get_proposal(db(), pid)
-    return render_template("detail.html", p=p) if p else ("Not found", 404)
+    if not p:
+        return "Not found", 404
+    return render_template("detail.html", p=p, version=store.action_version(p["action"]), stuck=store.is_stuck(p))
 
 
 @app.post("/proposal/<int:pid>/approve")
 def approve(pid):
     conn = db()
     note = request.form.get("note", "").strip() or None
-    if not store.claim(conn, pid, note):  # already applying/applied/rejected (e.g. a double click)
+    # Fails on a double click, or if a pipeline run changed the action after the reviewer opened it.
+    if not store.claim(conn, pid, note, version=request.form.get("version", "")):
         return redirect(url_for("detail", pid=pid))
     proposal = store.get_proposal(conn, pid)
     try:

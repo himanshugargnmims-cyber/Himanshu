@@ -51,7 +51,8 @@ CONFIDENCE = {"A": "high", "B": "high", "C": "medium", "D": "low"}
 
 
 def crm_care_types(loc):
-    return [CARE_TYPES.get(o.lower(), o) for o in loc.get("care_offerings", [])]
+    """Known labels only: an unrecognised website label is never written into care_type."""
+    return [CARE_TYPES[o.lower()] for o in loc.get("care_offerings", []) if o.lower() in CARE_TYPES]
 
 
 def location_key(loc):
@@ -144,7 +145,7 @@ def compare(loc, a, ctx):
         tier, signals = "A", [f"street address and city match; ZIP differs ({a.get(F_ZIP)} vs {loc['zip']})"]
     elif zip_eq and N.street_variant(s_loc, s_acc):
         tier, signals = "B", [f"same street number, type and direction + ZIP; spelling differs ('{a.get(F_STREET)}' vs '{loc['address']}')"]
-    elif city_eq and same_name and (phone_eq or admin_eq):
+    elif city_eq and ((same_name and (phone_eq or admin_eq)) or (phone_eq and admin_eq)):
         why = "CRM street is a PO Box" if N.is_po_box(a.get(F_STREET)) else f"CRM street '{a.get(F_STREET)}' differs"
         tier, signals = "C", [f"same name and city; {why}; identity confirmed by phone/administrator"]
     elif city_eq and same_name and a.get(F_PARENT) == ctx.parent[ID]:
@@ -187,8 +188,8 @@ def survivor_key(m, ctx, pointed_at):
         bool(a.get(F_DUP)),  # already marked as someone's duplicate
         bool(a.get(F_CHOW)),  # already superseded through a CHOW
         a[ID] not in pointed_at,  # an earlier decision already made it the survivor: stay consistent
+        a.get(F_PARENT) != ctx.parent[ID],  # already the Bellhaven record beats an old owner's leftover copy
         m.rank,
-        a.get(F_PARENT) != ctx.parent[ID],  # already the Bellhaven record
         -m.corroboration,
         a.get(F_STATUS) != ACTIVE,
         money(a.get(F_REV)) <= 0,
@@ -270,16 +271,22 @@ def build_proposals(locations, accounts, contacts=(), about_text="", site_comple
     """site_complete=False (fewer locations than the website claims) suppresses 'gone from website' proposals."""
     ctx = Context(accounts, contacts, about_text)
     proposals = []
-    report = {"confirmed": [], "created": [], "lookalikes_rejected": [], "colocated": [],
+    report = {"confirmed": [], "created": [], "lookalikes_rejected": [], "colocated": [], "ambiguous": [],
               "bellhaven_parent": label(ctx.parent), "site_complete": site_complete}
     claimed = set()  # account ids that belong to some website location
     assigned = {}  # account id -> location name it is the live record for
     shared = Counter(location_key(l) for l in locations)
     pointed_at = {a[F_DUP] for a in accounts if a.get(F_DUP)} | {a[F_CHOW] for a in accounts if a.get(F_CHOW)}
 
-    for loc in locations:
+    found_by_loc = {id(loc): [m for m in (compare(loc, a, ctx) for a in ctx.facilities) if m] for loc in locations}
+
+    def strength(loc):  # strongest links first, so a weak (tier D) or sibling match never takes another location's account
+        linked = [m for m in found_by_loc[id(loc)] if m.tier != "L"]
+        return min(((m.rank, -N.similarity(N.clean(loc["name"]), N.clean(m.account[F_NAME]))) for m in linked), default=(9, 0))
+
+    for loc in sorted(locations, key=strength):
         key = location_key(loc)
-        found = [m for m in (compare(loc, a, ctx) for a in ctx.facilities) if m]
+        found = found_by_loc[id(loc)]
         lookalikes = [m for m in found if m.tier == "L"]
         matches = [m for m in found if m.tier != "L" and m.account[ID] not in assigned]
         if shared[key] > 1:  # several communities share one street address: only the name can tell them apart
@@ -297,9 +304,13 @@ def build_proposals(locations, accounts, contacts=(), about_text="", site_comple
         claimed.update(m.account[ID] for m in matches)
 
         live, via_chow = primary.account, None
-        if live.get(F_CHOW) and live[F_CHOW] in ctx.by_id:  # follow an earlier CHOW to the current record
-            via_chow, live = live, ctx.by_id[live[F_CHOW]]
-            claimed.add(live[ID])
+        for pointer in (F_CHOW, F_DUP):  # follow an earlier CHOW / duplicate decision to the current record
+            if live.get(pointer) and live[pointer] in ctx.by_id:
+                via_chow, live = live, ctx.by_id[live[pointer]]
+                claimed.add(live[ID])
+        if live[ID] in assigned:  # that record already belongs to another website location
+            report["ambiguous"].append(loc["name"])
+            continue
         assigned[live[ID]] = loc["name"]
 
         if shared[key] == 1:  # never dedupe across co-located communities automatically
@@ -344,6 +355,7 @@ def _fix_primary(loc, key, a, match, ctx, lookalikes, via_chow):
     wrong_parent = a.get(F_PARENT) != parent[ID]
     po_box_note = None
     if N.is_po_box(a.get(F_STREET)) and loc["address"] not in (a.get(F_NOTE) or ""):
+        po_box_fact = f"{loc['address']}, {loc['city']}, {loc['state']} {loc['zip']}"
         po_box_note = (f"Physical address per Bellhaven website: {loc['address']}, {loc['city']}, {loc['state']} "
                        f"{loc['zip']}. billing_street left as '{a.get(F_STREET)}' (a PO Box is a valid billing address).")
     if not fixes and not wrong_parent and not po_box_note:
@@ -398,6 +410,8 @@ def _fix_primary(loc, key, a, match, ctx, lookalikes, via_chow):
     if po_box_note:
         note = f"{note} {po_box_note}" if note else po_box_note
     action = {"op": "update", "account_id": a[ID], "set": fixes, "expect": {k: a.get(k) or "" for k in fixes}, "note": note}
+    if po_box_note:
+        action["fact"] = po_box_fact  # fingerprinted, so a changed physical address is proposed again
     ev["plan"] = ([f"Update {', '.join(fixes)} on {label(a)}."] if fixes else []) + (
         ["Append a note with the physical address; leave the PO Box billing address."] if po_box_note else [])
     ev["changes"] = changes_rows(label(a), a, fixes) + (
@@ -409,19 +423,29 @@ def _fix_primary(loc, key, a, match, ctx, lookalikes, via_chow):
             "title": title, "confidence": conf, "action": action, "evidence": ev}
 
 
-def _duplicate(loc, key, dup, survivor, ctx, why=None):
+def _duplicate(loc, key, dup, survivor, ctx, why=None, survivor_parent=None):
     a = dup.account
     moved = [c["contact_id"] for c in ctx.contacts[a[ID]]]
     note = f"Duplicate of {label(survivor)}: same facility as Bellhaven website listing '{loc['name']}' ({loc['address']})."
     action = {"op": "update", "account_id": a[ID], "set": {F_DUP: survivor[ID], F_STATUS: INACTIVE},
               "expect": {F_DUP: a.get(F_DUP) or "", F_CHOW: a.get(F_CHOW) or ""}, "note": note,
-              "move_contacts": moved, "move_contacts_to": survivor[ID]}
+              "move_contacts": moved, "move_contacts_to": survivor[ID],
+              # At write time the kept copy must be live and already where it belongs (e.g. Kettering:
+              # approve the survivor's move under Bellhaven first).
+              "survivor_check": {"target_id": survivor[ID], "parent_id": survivor_parent or ctx.parent[ID]}}
+    if a.get(F_PARENT) != (survivor_parent or ctx.parent[ID]):
+        action["sop_path"] = DIRECT  # an old owner's copy may be retired only while it has no open AR
     conf = "high" if dup.tier in "AB" else "medium"
     reasons = (why or dup.signals) + ["kept copy chosen by: earlier decisions, match strength, already under Bellhaven, "
                                       "phone/administrator confirmation, Active, billing history, contacts, then lowest id"]
-    if money(a.get(F_REV)) > 0:
+    if money(a.get(F_REV)) > 0 or money(a.get(F_AR)) > 0:
         conf = "medium"
-        reasons.append("this copy has revenue history but no outstanding AR; only the duplicate flag and status change")
+        reasons.append(f"this copy has billing data (revenue {money(a.get(F_REV)):,.0f}, AR {money(a.get(F_AR)):,.0f}); "
+                       "only the duplicate flag and status change, nothing is deleted")
+    if survivor.get(F_PARENT) != ctx.parent[ID] and not survivor_parent:
+        conf = "medium"
+        reasons.append(f"depends on moving {label(survivor)} under Bellhaven first (its own proposal); "
+                       "approving this before that one is refused")
     plan = [f"Set duplicate_of_account = {survivor[ID]} and status = Inactive on {label(a)}; append a note."]
     if moved:
         plan.append(f"Move {len(moved)} contact(s) to {label(survivor)} (only those still on this account).")
@@ -499,6 +523,7 @@ def _takers(a, ctx):
     for o in ctx.facilities:
         parent = ctx.by_id.get(o.get(F_PARENT) or "")
         if (o[ID] == a[ID] or not parent or not ctx.is_corporate(parent) or parent[ID] == ctx.parent[ID]
+                or ctx.about_mentions(parent[ID])  # Bellhaven acquired FROM them: a leftover copy, not a buyer
                 or o.get(F_STATUS) != ACTIVE or o.get(F_DUP) or o.get(F_CHOW)
                 or a[ID] in (o.get(F_DUP), o.get(F_CHOW)) or o[ID] in (a.get(F_DUP), a.get(F_CHOW))):
             continue
@@ -563,7 +588,7 @@ def _moved_away(a, taker, ctx):
     as_location = {"name": taker[F_NAME], "address": taker.get(F_STREET) or "", "city": taker.get(F_CITY) or "",
                    "state": taker.get(F_STATE) or "", "zip": taker.get(F_ZIP) or "", "phone": taker.get(F_PHONE) or "",
                    "care_offerings": [taker[F_CARE]] if taker.get(F_CARE) else []}
-    dup = _duplicate(as_location, None, Match(a, "A", reasoning), taker, ctx)
+    dup = _duplicate(as_location, None, Match(a, "A", reasoning), taker, ctx, survivor_parent=taker[F_PARENT])
     dup["evidence"]["sop"] = sop
     dup["evidence"]["summary"] = (f"Not on the Bellhaven website; {owner} already has an account at the same address. "
                                   "No outstanding AR, so the Bellhaven copy is retired as its duplicate.")
@@ -578,7 +603,7 @@ def _operator_note(corp, ctx, sentence):
         "kind": "operator_note", "subject": f"account:{corp[ID]}", "account_id": corp[ID], "location_key": None,
         "title": f"Note on {corp[F_NAME]}: About page says communities joined Bellhaven",
         "confidence": "high",
-        "action": {"op": "update", "account_id": corp[ID], "set": {}, "expect": {}, "note": note},
+        "action": {"op": "update", "account_id": corp[ID], "set": {}, "expect": {}, "note": note, "fact": sentence},
         "evidence": {
             "summary": "Parent company named on Bellhaven's About page as a source of acquired communities.",
             "reasoning": [f"About page: \"{sentence}\"",

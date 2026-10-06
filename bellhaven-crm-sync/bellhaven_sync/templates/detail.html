@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block body %}
+{% set ev = p.evidence %}
+<p><a href="{{ url_for('index') }}">← back to queue</a></p>
+<div class="card">
+  <span class="pill kind">{{ p.kind }}</span> <span class="pill {{ p.confidence }}">{{ p.confidence }} confidence</span>
+  <span class="muted">· status: <strong>{{ p.status }}</strong> · proposal #{{ p.id }}</span>
+  <h2 style="margin:8px 0">{{ p.title }}</h2>
+  <p>{{ ev.summary }}</p>
+  {% if ev.reasoning %}<ul>{% for r in ev.reasoning %}<li>{{ r }}</li>{% endfor %}</ul>{% endif %}
+</div>
+
+<div class="card">
+  <h3>What will be written</h3>
+  {% for step in ev.plan %}<p>{{ loop.index }}. {{ step }}</p>{% endfor %}
+  {% if ev.changes %}
+  <table>
+    <tr><th>Account</th><th>Field</th><th>Current CRM value</th><th>New value</th></tr>
+    {% for c in ev.changes %}
+    <tr><td>{{ c.account }}</td><td>{{ c.field }}</td><td class="before">{{ c.before if c.before is not none else '∅' }}</td><td class="after">{{ c.after }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+
+{% if ev.sop %}
+<div class="card sop">
+  <h3>Billing SOP check (re-checked against live data at approval)</h3>
+  <table>
+    <tr><th>Lifetime revenue</th><td>{{ ev.sop.lifetime_revenue }}</td></tr>
+    <tr><th>Outstanding AR</th><td>{{ ev.sop.outstanding_ar }}</td></tr>
+    <tr><th>Path</th><td><strong>{{ ev.sop.path|upper }}</strong>: {{ ev.sop.reason }}</td></tr>
+  </table>
+</div>
+{% endif %}
+
+{% if ev.comparison %}
+<div class="card">
+  <h3>Evidence: website vs CRM</h3>
+  <table>
+    <tr><th>Field</th><th>Website</th><th>CRM</th></tr>
+    {% for c in ev.comparison %}
+    <tr class="{{ '' if c.match else 'mismatch' }}"><td>{{ c.field }}</td><td>{{ c.website }}</td><td>{{ c.crm }}</td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+{% if ev.related %}
+<div class="card">
+  <h3>Related CRM accounts</h3>
+  <table>
+    <tr><th>Role</th><th>ID</th><th>Name</th><th>Address</th><th>Parent</th><th>Status</th><th>Revenue / AR</th><th>Contacts</th></tr>
+    {% for r in ev.related %}
+    <tr><td>{{ r.role }}</td><td>{{ r.id }}</td><td>{{ r.name }}</td><td>{{ r.address }}</td><td>{{ r.parent }}</td><td>{{ r.status }}</td><td>{{ r.billing }}</td><td>{{ r.contacts }}</td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+<div class="card">
+  {% if p.status in ('pending', 'failed') or stuck %}
+  <form method="post" action="{{ url_for('approve', pid=p.id) }}" style="display:inline">
+    <input type="hidden" name="version" value="{{ version }}">
+    <input type="text" name="note" placeholder="Optional reviewer note" value="{{ p.decision_note or '' }}">
+    <button class="approve">{{ 'Retry write (continues from saved progress)' if p.status != 'pending' else 'Approve & write to CRM' }}</button>
+  </form>
+  {% endif %}
+  {% if p.status in ('pending', 'failed', 'stale') %}
+  <form method="post" action="{{ url_for('reject', pid=p.id) }}" style="display:inline">
+    <input type="hidden" name="note" value=""><button class="reject">{{ 'Reject' if p.status == 'pending' else 'Abandon' }}</button>
+  </form>
+  {% endif %}
+  {% if p.decision_note %}<p class="muted">Reviewer note: {{ p.decision_note }}</p>{% endif %}
+  {% if p.result %}<h3>Result</h3><pre>{{ p.result | tojson(indent=2) }}</pre>{% endif %}
+</div>
+
+<details class="card"><summary>Raw action / evidence</summary>
+  <pre>{{ p.action | tojson(indent=2) }}</pre><pre>{{ ev | tojson(indent=2) }}</pre>
+</details>
+{% endblock %}

@@ -2,7 +2,7 @@
 
 ## Time spent
 
-> **Fill in honestly before submitting:** ___ h ___ min of focused time.
+> **Time spent:** 3 hours of focused time.
 > (Includes directing the AI tools and checking their work, which the brief says is the point.)
 
 ## What I built

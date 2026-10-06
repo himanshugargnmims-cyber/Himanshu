@@ -1,0 +1,6 @@
+state/*.db
+state/*.db-*
+state/snapshots/
+.env
+__pycache__/
+.pytest_cache/

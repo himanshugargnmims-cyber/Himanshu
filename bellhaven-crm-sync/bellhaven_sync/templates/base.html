@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bellhaven CRM Review</title>
+<style>
+  :root { --bg:#f7f7f5; --card:#fff; --ink:#1d1d1b; --muted:#6b6b66; --line:#e2e1dc;
+          --ok:#1f7a4d; --warn:#a15c00; --bad:#b3261e; --accent:#2f5d8a; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--ink); }
+  header { background:var(--ink); color:#fff; padding:12px 20px; display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  header a { color:#fff; text-decoration:none; font-weight:600; }
+  main { max-width:1100px; margin:0 auto; padding:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin-bottom:12px; }
+  table { border-collapse:collapse; width:100%; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.03em; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; font-weight:600; border:1px solid currentColor; }
+  .high { color:var(--ok); } .medium { color:var(--warn); } .low { color:var(--bad); }
+  .kind { color:var(--accent); }
+  .muted { color:var(--muted); }
+  .tabs a { margin-right:12px; color:var(--accent); }
+  .tabs a.active { font-weight:700; text-decoration:none; color:var(--ink); }
+  .before { color:var(--bad); text-decoration:line-through; }
+  .after { color:var(--ok); font-weight:600; }
+  .mismatch { background:#fff4e5; }
+  button { font:inherit; padding:6px 14px; border-radius:6px; border:1px solid var(--line); cursor:pointer; background:#fff; }
+  button.approve { background:var(--ok); color:#fff; border-color:var(--ok); }
+  button.reject { color:var(--bad); border-color:var(--bad); }
+  input[type=text] { font:inherit; padding:6px; width:min(420px,100%); border:1px solid var(--line); border-radius:6px; }
+  pre { white-space:pre-wrap; word-break:break-word; background:#f1f0ec; padding:8px; border-radius:6px; font-size:12px; }
+  .sop { border-left:4px solid var(--warn); }
+  .grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:12px; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<header><a href="{{ url_for('index') }}">Bellhaven CRM review queue</a>
+  <form method="post" action="{{ url_for('run_pipeline') }}" style="margin-left:auto"><button>Run pipeline now</button></form>
+</header>
+<main>{% block body %}{% endblock %}</main>
+</body>
+</html>

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="card">
+  {% if run %}
+    <strong>Last run #{{ run.id }}</strong> <span class="muted">{{ run.started_at }} · {{ run.status }}</span>
+    <div class="muted">
+      {% for k, v in run.summary.items() %}{{ k }}: <strong>{{ v }}</strong>{% if not loop.last %} · {% endif %}{% endfor %}
+    </div>
+  {% else %}<span class="muted">No runs yet. Click "Run pipeline now".</span>{% endif %}
+</div>
+<div class="tabs card">
+  {% for s in ["pending", "applied", "rejected", "approved", "stale", "all"] %}
+    <a href="{{ url_for('index', status=s) }}" class="{{ 'active' if s == status }}">{{ s }} ({{ counts.get(s, 0) if s != 'all' else counts.values()|sum }})</a>
+  {% endfor %}
+</div>
+<div class="card">
+<table>
+  <tr><th>#</th><th>Type</th><th>Proposal</th><th>Confidence</th><th>Status</th><th></th></tr>
+  {% for p in proposals %}
+  <tr>
+    <td>{{ p.id }}</td>
+    <td><span class="pill kind">{{ p.kind }}</span></td>
+    <td><a href="{{ url_for('detail', pid=p.id) }}">{{ p.title }}</a>
+        <div class="muted">{{ p.evidence.summary }}</div></td>
+    <td><span class="pill {{ p.confidence }}">{{ p.confidence }}</span></td>
+    <td>{{ p.status }}</td>
+    <td style="white-space:nowrap">
+      {% if p.status == 'pending' %}
+      <form method="post" action="{{ url_for('approve', pid=p.id) }}" style="display:inline"><button class="approve">Approve</button></form>
+      <form method="post" action="{{ url_for('reject', pid=p.id) }}" style="display:inline">
+        <input type="hidden" name="next" value="{{ request.full_path }}"><button class="reject">Reject</button></form>
+      {% endif %}
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6" class="muted">Nothing here.</td></tr>
+  {% endfor %}
+</table>
+</div>
+{% endblock %}

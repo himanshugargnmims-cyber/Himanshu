@@ -1,0 +1,64 @@
+# Alternative to cron. To activate, copy to .github/workflows/bellhaven-daily.yml
+# and add the repository secret BELLHAVEN_API_TOKEN.
+#
+# Re-run safety needs the decision history to survive between runs, so the
+# SQLite state lives on a dedicated `bellhaven-state` branch: pulled before the
+# run, pushed after.
+#
+# Caveat (why crontab.txt is the primary config): the review app records
+# decisions in its own copy of the db. With Actions you have two writers, so
+# rejected items only stay suppressed if the reviewer's db is synced back.
+# Approved items are safe either way: once applied, the CRM matches the website
+# and nothing is re-proposed. In production, swap SQLite for a shared Postgres.
+name: bellhaven-crm-sync-daily
+
+on:
+  schedule:
+    - cron: "10 11 * * *"   # 06:10 US Central (UTC-5); GitHub cron is UTC
+  workflow_dispatch: {}
+
+concurrency:
+  group: bellhaven-crm-sync   # never two runs at once
+  cancel-in-progress: false
+
+permissions:
+  contents: write            # to push the updated state branch
+
+jobs:
+  propose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: bellhaven-crm-sync
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Restore decision history
+        run: |
+          git fetch origin bellhaven-state || true
+          if git rev-parse --verify origin/bellhaven-state >/dev/null 2>&1; then
+            git show origin/bellhaven-state:bellhaven.db > state/bellhaven.db
+          fi
+
+      - name: Run pipeline (read-only against CRM; only creates proposals)
+        env:
+          BELLHAVEN_API_TOKEN: ${{ secrets.BELLHAVEN_API_TOKEN }}
+        run: python -m bellhaven_sync.pipeline
+
+      - name: Save decision history
+        if: always()
+        run: |
+          # Write the db as a single-file commit on its own branch (no checkout needed).
+          git config user.name "bellhaven-sync-bot"
+          git config user.email "bellhaven-sync-bot@users.noreply.github.com"
+          blob=$(git hash-object -w state/bellhaven.db)
+          tree=$(printf "100644 blob %s\tbellhaven.db\n" "$blob" | git mktree)
+          commit=$(git commit-tree "$tree" -m "state: $(date -u +%FT%TZ)")
+          git push -f origin "$commit:refs/heads/bellhaven-state"

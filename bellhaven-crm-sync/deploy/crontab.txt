@@ -1,0 +1,5 @@
+# Bellhaven CRM sync: daily at 06:10 local time, before reps start their day.
+# Runs on the same machine as the review app so both share state/bellhaven.db.
+# flock -n: if yesterday's run is somehow still going, skip instead of overlapping.
+# .env holds:  export BELLHAVEN_API_TOKEN=bh_...   (never committed)
+10 6 * * * cd /opt/bellhaven-crm-sync && . ./.env && flock -n state/.pipeline.lock python3 -m bellhaven_sync.pipeline >> state/pipeline.log 2>&1
